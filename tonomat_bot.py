@@ -1,23 +1,31 @@
 import logging
 import sqlite3
+import os
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from dotenv import load_dotenv
 
 # Setup logging for debugging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Load environment variables
+load_dotenv()
+API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not API_TOKEN:
+    logger.error("No TELEGRAM_BOT_TOKEN found in .env file")
+    raise ValueError("TELEGRAM_BOT_TOKEN not set in .env file")
+
 # Initialize SQLite database
 conn = sqlite3.connect('market.db', check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('''CREATE TABLE IF NOT EXISTS items 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, desc TEXT, price REAL, seller_id INTEGER)''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, desc TEXT, price REAL, seller_id INTEGER, stock INTEGER DEFAULT 1)''')
 cursor.execute('''CREATE TABLE IF NOT EXISTS profiles 
                  (user_id INTEGER PRIMARY KEY, items_sold INTEGER DEFAULT 0, items_bought INTEGER DEFAULT 0)''')
+cursor.execute('''CREATE TABLE IF NOT EXISTS orders 
+                 (order_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, item_id INTEGER, status TEXT, drop_location TEXT)''')
 conn.commit()
-
-# Bot token from @BotFather
-API_TOKEN = '8212040328:AAF-dr5n6dNKXyKazxIfYOpOHKIx4iZstEI'  # Replace with your actual token
 
 # Define custom keyboard
 def get_custom_keyboard():
@@ -45,28 +53,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    items = cursor.execute("SELECT id, desc, price FROM items").fetchall()
+    items = cursor.execute("SELECT id, desc, price, stock FROM items WHERE stock > 0").fetchall()
     if not items:
         logger.info("Shop is empty for user %s", update.effective_user.id)
-        await update.message.reply_text(
+        await update.message.reply_text(https://github.com/FrankySolAnalyst/Tonomat2.0/blob/main/photos/PozaShopnow.jpg
             "The shop is empty. List an item with /sell! 😞",
             reply_markup=get_custom_keyboard()
         )
         return
-    message = "Available products:\n" + "\n".join([f"ID {id}: {desc} - {price} BTC" for id, desc, price in items])
+    message = "Available products:\n" + "\n".join([f"ID {id}: {desc} - {price} BTC (Stock: {stock})" for id, desc, price, stock in items])
     logger.info("Sending shop items to user %s", update.effective_user.id)
-    # Use raw GitHub URL for the image (adjust path if needed)
-    image_url = 'photos/PozaShopnow.jpg'
-    try:
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=image_url,
-            caption="Shop-ul dacic 🌿🏛️✨\n" + message,
-            reply_markup=get_custom_keyboard()
-        )
-    except Exception as e:
-        logger.error("Error sending photo from GitHub: %s", str(e))
-        await update.message.reply_text("Error loading shop image. 😞\n" + message, reply_markup=get_custom_keyboard())
+    await update.message.reply_text(
+        "Shop-ul dacic 🌿🏛️✨\n" + message + "\n\nUse /buy <item_id> to purchase.",
+        reply_markup=get_custom_keyboard()
+    )
 
 async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -80,7 +80,7 @@ async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     desc = " ".join(context.args[:-1])
     try:
         price = float(context.args[-1])
-        cursor.execute("INSERT INTO items (desc, price, seller_id) VALUES (?, ?, ?)", (desc, price, user_id))
+        cursor.execute("INSERT INTO items (desc, price, seller_id, stock) VALUES (?, ?, ?, ?)", (desc, price, user_id, 1))
         conn.commit()
         item_id = cursor.lastrowid
         cursor.execute("UPDATE profiles SET items_sold = items_sold + 1 WHERE user_id = ?", (user_id,))
@@ -94,6 +94,46 @@ async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Invalid price format from user %s", user_id)
         await update.message.reply_text(
             "Price must be a number (e.g., /sell Cool Gadget 0.001)",
+            reply_markup=get_custom_keyboard()
+        )
+
+async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if len(context.args) != 1:
+        logger.warning("Invalid /buy command from user %s", user_id)
+        await update.message.reply_text(
+            "Usage: /buy <item_id>",
+            reply_markup=get_custom_keyboard()
+        )
+        return
+    try:
+        item_id = int(context.args[0])
+        item = cursor.execute("SELECT desc, price, stock FROM items WHERE id = ? AND stock > 0", (item_id,)).fetchone()
+        if not item:
+            logger.warning("Item %s not found or out of stock for user %s", item_id, user_id)
+            await update.message.reply_text(
+                "Item not found or out of stock. Check /shop for available items. 😞",
+                reply_markup=get_custom_keyboard()
+            )
+            return
+        desc, price, stock = item
+        # Simulate payment (replace with crypto integration in production)
+        cursor.execute("INSERT INTO orders (user_id, item_id, status, drop_location) VALUES (?, ?, ?, ?)",
+                      (user_id, item_id, "pending_payment", "40.7128,-74.0060"))  # Dummy coordinates
+        cursor.execute("UPDATE items SET stock = stock - 1 WHERE id = ?", (item_id,))
+        cursor.execute("UPDATE profiles SET items_bought = items_bought + 1 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        order_id = cursor.lastrowid
+        logger.info("Order %s created for item %s by user %s", order_id, item_id, user_id)
+        await update.message.reply_text(
+            f"Order {order_id} placed for {desc} ({price} BTC). Send payment to address: [Testnet Address Placeholder]. "
+            f"After confirmation, drop location: https://maps.google.com/?q=40.7128,-74.0060",
+            reply_markup=get_custom_keyboard()
+        )
+    except ValueError:
+        logger.error("Invalid item ID format from user %s", user_id)
+        await update.message.reply_text(
+            "Item ID must be a number (e.g., /buy 1)",
             reply_markup=get_custom_keyboard()
         )
 
@@ -118,7 +158,7 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Deposit command triggered by user %s", update.effective_user.id)
     await update.message.reply_text(
-        "Deposit crypto to buy items. Use /deposit to generate a payment address (coming soon). 💸",
+        "Deposit crypto to buy items. Payment system coming soon (use testnet for thesis). 💸",
         reply_markup=get_custom_keyboard()
     )
 
@@ -130,6 +170,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/profile - View your stats\n"
         "/shop - Browse products\n"
         "/sell <desc> <price> - List an item\n"
+        "/buy <item_id> - Buy an item\n"
         "/deposit - Fund your account\n"
         "/news - Latest updates\n"
         "/sos - Emergency support\n"
@@ -141,7 +182,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("News command triggered by user %s", update.effective_user.id)
     await update.message.reply_text(
-        "News: AnonMarket is live for testing! Stay tuned for crypto deposits and dead drop features. 📰🎉",
+        "News: AnonMarket now supports buying! Crypto deposits and dead drops in testing. 📰🎉",
         reply_markup=get_custom_keyboard()
     )
 
@@ -200,6 +241,7 @@ def main() -> None:
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("shop", shop))
         application.add_handler(CommandHandler("sell", sell))
+        application.add_handler(CommandHandler("buy", buy))
         application.add_handler(CommandHandler("profile", profile))
         application.add_handler(CommandHandler("deposit", deposit))
         application.add_handler(CommandHandler("help", help_command))
@@ -218,6 +260,7 @@ def main() -> None:
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
         logger.error("Failed to start bot: %s", str(e))
+        raise
 
 if __name__ == '__main__':
     main()
